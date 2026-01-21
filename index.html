@@ -1,540 +1,1009 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Celestial Navigator: House of Wisdom</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Quicksand:wght@300;500&family=Amiri:ital@0;1&display=swap');
-        
-        :root {
-            --gold: #c5a059;
-            --gold-bright: #e0d5b0;
-            --deep-blue: #020617;
-            --ethereal: rgba(197, 160, 89, 0.1);
-        }
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Sun, MoonStar, Compass, Sparkles, Telescope, TimerReset, CheckCircle2, XCircle, Info, BookOpen, Zap, RotateCcw, Target } from "lucide-react";
 
-        body { margin: 0; overflow: hidden; background: var(--deep-blue); font-family: 'Quicksand', sans-serif; color: var(--gold-bright); }
-        canvas { display: block; }
-        h1, h2, .font-ancient { font-family: 'Cinzel', serif; }
-        .arabic-style { font-family: 'Amiri', serif; }
+/**
+ * Islamic Astronomy Mini-Game (browser-friendly, educational)
+ * Single-file React component.
+ *
+ * Modes:
+ * 1) Hilal Hunt: set sunset + moon parameters; decide if likely visible (simplified, educational model)
+ * 2) Qibla Quest: estimate Qibla direction using map-like bearings (no real geodesy; game bearings)
+ * 3) Prayer Time Planner: learn high-latitude rules by choosing method for scenario
+ * 4) Quick Quiz: short MCQ bank
+ */
 
-        #ui-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
-        .interactive { pointer-events: auto; }
-        
-        .ui-card {
-            background: linear-gradient(165deg, rgba(15, 23, 42, 0.9) 0%, rgba(2, 6, 23, 0.95) 100%);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(197, 160, 89, 0.4);
-            padding: 40px;
-            border-radius: 4px;
-            text-align: center;
-            box-shadow: 0 0 80px rgba(0,0,0,0.9), inset 0 0 30px rgba(197, 160, 89, 0.05);
-            position: relative;
-        }
+// ---------- Utility ----------
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const round1 = (n) => Math.round(n * 10) / 10;
+const round2 = (n) => Math.round(n * 100) / 100;
 
-        .btn-gold {
-            background: var(--gold); color: #0f172a;
-            padding: 14px 32px; border-radius: 2px; font-weight: 700;
-            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            cursor: pointer; border: 2px solid var(--gold);
-            text-transform: uppercase; letter-spacing: 2px;
-            font-family: 'Cinzel', serif;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-        }
-        .btn-gold:hover { 
-            background: transparent; color: var(--gold); 
-            box-shadow: 0 0 25px var(--gold); transform: translateY(-2px);
-        }
+function seededRng(seed) {
+  // simple LCG for repeatable daily seeds
+  let s = seed >>> 0;
+  return () => {
+    s = (1664525 * s + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
 
-        #crosshair {
-            position: absolute; top: 50%; left: 50%; width: 60px; height: 60px;
-            transform: translate(-50%, -50%); pointer-events: none;
-            transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-        }
-        #crosshair.target-locked { transform: translate(-50%, -50%) scale(1.3); }
-        #crosshair.target-locked svg { stroke: #fff; filter: drop-shadow(0 0 8px #fff); }
+function todaySeed() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  return (y * 10000 + m * 100 + day) >>> 0;
+}
 
-        #compass-container {
-            position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
-            width: 400px; height: 50px; pointer-events: none;
-            border-top: 1px solid rgba(197, 160, 89, 0.3);
-            border-bottom: 1px solid rgba(197, 160, 89, 0.3);
-            mask-image: linear-gradient(to right, transparent, black, black, transparent);
-        }
-        #compass-strip {
-            position: absolute; white-space: nowrap; height: 100%; display: flex; align-items: center;
-            font-family: 'Cinzel', serif; font-size: 16px; letter-spacing: 8px; color: var(--gold);
-            transition: transform 0.1s linear;
-        }
+// Simplified educational visibility score (NOT a fiqh ruling, NOT a scientific criterion).
+// Roughly rewards altitude, elongation, age, and penalizes haze/cloud + low width.
+function hilalScore({ altDeg, elongDeg, ageHours, widthArcMin, haze, clouds }) {
+  const alt = clamp(altDeg, -1, 15);
+  const el = clamp(elongDeg, 0, 20);
+  const age = clamp(ageHours, 0, 30);
+  const w = clamp(widthArcMin, 0, 1);
 
-        .loader {
-            width: 30px; height: 30px; border: 3px solid rgba(197, 160, 89, 0.2);
-            border-top-color: var(--gold); border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
+  const base =
+    0.35 * (alt / 10) +
+    0.35 * (el / 15) +
+    0.2 * (age / 24) +
+    0.1 * (w / 0.4);
 
-        .scanline {
-            width: 100%; height: 2px; background: rgba(197, 160, 89, 0.1);
-            position: absolute; top: 0; animation: scan 4s linear infinite;
-        }
-        @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
+  const weatherPenalty = (haze ? 0.14 : 0) + (clouds ? 0.22 : 0);
+  const score = clamp(base - weatherPenalty, 0, 1);
 
-        .fact-card {
-            border-left: 2px solid var(--gold); background: rgba(197, 160, 89, 0.05);
-            padding: 1rem; margin-top: 1.5rem; animation: slideUp 0.5s ease-out;
-        }
-        @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  // categorize
+  const likely = score >= 0.62;
+  const maybe = score >= 0.45 && score < 0.62;
+  return { score, likely, maybe };
+}
 
-        /* Game Over / Win State */
-        #win-screen {
-            display: none;
-            position: absolute; inset: 0; background: rgba(2, 6, 23, 0.9);
-            z-index: 100; align-items: center; justify-content: center;
-            pointer-events: auto;
-        }
-    </style>
-</head>
-<body>
+function verdictText({ likely, maybe }) {
+  if (likely) return { label: "Likely visible", tone: "good" };
+  if (maybe) return { label: "Uncertain", tone: "warn" };
+  return { label: "Unlikely", tone: "bad" };
+}
 
-<div id="ui-overlay">
-    <!-- HUD -->
-    <div id="crosshair">
-        <svg viewBox="0 0 100 100" fill="none" stroke="#c5a059" stroke-width="1.5">
-            <circle cx="50" cy="50" r="45" stroke-dasharray="4 8" />
-            <path d="M50 5 L50 20 M50 80 L50 95 M5 50 L20 50 M80 50 L95 50" />
-            <rect x="48" y="48" width="4" height="4" fill="#c5a059" />
-        </svg>
+function toneBadge(tone) {
+  if (tone === "good") return "bg-emerald-500/15 text-emerald-200 border-emerald-500/30";
+  if (tone === "warn") return "bg-amber-500/15 text-amber-200 border-amber-500/30";
+  return "bg-rose-500/15 text-rose-200 border-rose-500/30";
+}
+
+function degDiff(a, b) {
+  // shortest angular difference (0..180)
+  const d = Math.abs(((a - b + 180) % 360) - 180);
+  return d;
+}
+
+// ---------- Question Banks ----------
+const QUIZ_BANK = [
+  {
+    q: "In Islamic astronomy (falak), what does ‘hilal’ usually refer to?",
+    options: [
+      "A meteor shower",
+      "The first visible crescent after conjunction",
+      "A solar eclipse",
+      "The full moon",
+    ],
+    answer: 1,
+    why: "Hilal commonly means the first visible crescent Moon marking the start of a lunar month.",
+    tag: "Hilal",
+  },
+  {
+    q: "Why can prayer times be challenging in high latitudes during summer?",
+    options: [
+      "Because the Moon is always below the horizon",
+      "Because twilight can persist and the Sun may not reach standard angles",
+      "Because the Kaaba changes location",
+      "Because Earth stops rotating",
+    ],
+    answer: 1,
+    why: "At high latitudes, twilight may not end (or becomes very short), making standard definitions difficult.",
+    tag: "Prayer Times",
+  },
+  {
+    q: "Qibla is the direction Muslims face during prayer toward:",
+    options: ["Al-Aqsa Mosque", "The Kaaba in Makkah", "The North Star", "The Sun"],
+    answer: 1,
+    why: "Qibla direction is toward the Kaaba in Makkah.",
+    tag: "Qibla",
+  },
+  {
+    q: "Which tool is most directly used for observing the crescent in traditional rukyah?",
+    options: ["Thermometer", "Telescope/Binoculars", "Seismograph", "Barometer"],
+    answer: 1,
+    why: "Optical aids like binoculars or telescopes can help observe the crescent (subject to local practice).",
+    tag: "Observation",
+  },
+  {
+    q: "In general, more haze and clouds at the western horizon will:",
+    options: ["Increase hilal visibility", "Have no effect", "Reduce visibility", "Move the Moon"],
+    answer: 2,
+    why: "Atmospheric conditions strongly impact optical visibility.",
+    tag: "Atmosphere",
+  },
+];
+
+// ---------- Scenarios ----------
+const PRAYER_SCENARIOS = [
+  {
+    id: "malaysia",
+    title: "Equatorial-ish (e.g., Malaysia)",
+    desc: "Normal night; clear separation of twilight and night.",
+    lat: 5,
+    summer: false,
+    hint: "Standard angle-based methods usually work fine.",
+    correct: ["Standard (angles)", "Local authority timetable"],
+  },
+  {
+    id: "uk_summer",
+    title: "High latitude summer (e.g., UK)",
+    desc: "Very late/short night; twilight may persist.",
+    lat: 52,
+    summer: true,
+    hint: "You may need an adjusted method (e.g., nearest latitude/day, 1/7 night, middle of night) based on authority.",
+    correct: ["Middle of the night", "1/7 night", "Nearest latitude", "Nearest day"],
+  },
+  {
+    id: "arctic",
+    title: "Polar region (midnight sun)",
+    desc: "Sun does not set for weeks.",
+    lat: 69,
+    summer: true,
+    hint: "Fixed schedules and authority guidance become essential.",
+    correct: ["Local authority timetable", "Nearest latitude"],
+  },
+];
+
+const PRAYER_METHODS = [
+  {
+    name: "Standard (angles)",
+    detail: "Uses sun angles for Fajr/Isha (works where twilight behaves normally).",
+  },
+  {
+    name: "Middle of the night",
+    detail: "Splits night into halves; Fajr/Isha set around midpoint (used in some high-latitude guidance).",
+  },
+  {
+    name: "1/7 night",
+    detail: "Divides night into 7 parts; allocates twilight portion (seen in some fiqh discussions).",
+  },
+  {
+    name: "Nearest latitude",
+    detail: "Adopts times from a latitude where twilight is normal (e.g., 48°).",
+  },
+  {
+    name: "Nearest day",
+    detail: "Uses nearest day when angles become valid again.",
+  },
+  {
+    name: "Local authority timetable",
+    detail: "Follow official timetable/masjid guidance for your region.",
+  },
+];
+
+// Qibla mini-bearings game: cities with pre-made Qibla bearings (approx) for gameplay.
+// Note: These bearings are coarse and for game learning only.
+const QIBLA_LEVELS = [
+  { city: "Kuala Lumpur", bearing: 292, tip: "From SE Asia, Qibla is roughly WNW." },
+  { city: "London", bearing: 118, tip: "From UK, Qibla is roughly ESE." },
+  { city: "Tokyo", bearing: 263, tip: "From Japan, Qibla is roughly W." },
+  { city: "Cape Town", bearing: 25, tip: "From South Africa, Qibla is roughly NNE." },
+  { city: "New York", bearing: 58, tip: "From USA East Coast, Qibla is roughly NE." },
+];
+
+// ---------- Main Component ----------
+export default function IslamicAstronomyMiniGame() {
+  const [tab, setTab] = useState("hilal");
+
+  // Global progression
+  const [xp, setXp] = useState(0);
+  const level = Math.floor(xp / 120) + 1;
+  const xpInLevel = xp % 120;
+
+  // Daily challenge seed
+  const rng = useMemo(() => seededRng(todaySeed()), []);
+
+  // ---------- Hilal Hunt ----------
+  const [altDeg, setAltDeg] = useState(2.2);
+  const [elongDeg, setElongDeg] = useState(7.0);
+  const [ageHours, setAgeHours] = useState(16);
+  const [widthArcMin, setWidthArcMin] = useState(0.12);
+  const [haze, setHaze] = useState(false);
+  const [clouds, setClouds] = useState(false);
+  const [hilalLog, setHilalLog] = useState([]);
+
+  const hs = useMemo(
+    () => hilalScore({ altDeg, elongDeg, ageHours, widthArcMin, haze, clouds }),
+    [altDeg, elongDeg, ageHours, widthArcMin, haze, clouds]
+  );
+  const verdict = useMemo(() => verdictText(hs), [hs]);
+
+  function randomHilal() {
+    // generate a plausible teaching case
+    const alt = round1(0.5 + rng() * 6.0);
+    const el = round1(4.0 + rng() * 8.0);
+    const age = Math.round(8 + rng() * 18);
+    const w = round2(0.04 + rng() * 0.26);
+    const hz = rng() < 0.35;
+    const cl = rng() < 0.25;
+    setAltDeg(alt);
+    setElongDeg(el);
+    setAgeHours(age);
+    setWidthArcMin(w);
+    setHaze(hz);
+    setClouds(cl);
+  }
+
+  function submitHilalDecision(decision) {
+    // decision: 'seen' or 'not'
+    const correct = hs.likely ? decision === "seen" : hs.maybe ? false : decision === "not";
+    // In uncertain zone, force learning: treat as partial (no big penalty)
+    let delta = 0;
+    if (hs.maybe) delta = decision === "seen" ? 8 : 8; // both acceptable, it's uncertain
+    else delta = correct ? 20 : 5;
+
+    setXp((x) => x + delta);
+    setHilalLog((prev) => [
+      {
+        id: crypto.randomUUID(),
+        altDeg,
+        elongDeg,
+        ageHours,
+        widthArcMin,
+        haze,
+        clouds,
+        decision,
+        verdict: verdict.label,
+        score: hs.score,
+        delta,
+      },
+      ...prev,
+    ].slice(0, 8));
+  }
+
+  // ---------- Qibla Quest ----------
+  const [qLevelIdx, setQLevelIdx] = useState(() => Math.floor(rng() * QIBLA_LEVELS.length));
+  const qLevel = QIBLA_LEVELS[qLevelIdx];
+  const [guessBearing, setGuessBearing] = useState(0);
+  const [qiblaHistory, setQiblaHistory] = useState([]);
+
+  function nextQiblaLevel() {
+    setQLevelIdx((i) => (i + 1) % QIBLA_LEVELS.length);
+    setGuessBearing(0);
+  }
+
+  function submitQibla() {
+    const diff = degDiff(guessBearing, qLevel.bearing);
+    const stars = diff <= 6 ? 3 : diff <= 15 ? 2 : diff <= 30 ? 1 : 0;
+    const delta = 6 + stars * 10;
+    setXp((x) => x + delta);
+    setQiblaHistory((prev) => [
+      {
+        id: crypto.randomUUID(),
+        city: qLevel.city,
+        target: qLevel.bearing,
+        guess: guessBearing,
+        diff,
+        stars,
+        delta,
+      },
+      ...prev,
+    ].slice(0, 8));
+    nextQiblaLevel();
+  }
+
+  // ---------- Prayer Planner ----------
+  const [pScenarioId, setPScenarioId] = useState(PRAYER_SCENARIOS[0].id);
+  const scenario = useMemo(
+    () => PRAYER_SCENARIOS.find((s) => s.id === pScenarioId) ?? PRAYER_SCENARIOS[0],
+    [pScenarioId]
+  );
+  const [methodPick, setMethodPick] = useState(PRAYER_METHODS[0].name);
+  const [plannerLog, setPlannerLog] = useState([]);
+
+  function submitPlanner() {
+    const ok = scenario.correct.includes(methodPick);
+    const delta = ok ? 20 : 7;
+    setXp((x) => x + delta);
+    setPlannerLog((prev) => [
+      {
+        id: crypto.randomUUID(),
+        scenario: scenario.title,
+        method: methodPick,
+        ok,
+        delta,
+      },
+      ...prev,
+    ].slice(0, 8));
+  }
+
+  // ---------- Quiz ----------
+  const [quizIdx, setQuizIdx] = useState(() => Math.floor(rng() * QUIZ_BANK.length));
+  const [quizPick, setQuizPick] = useState(null);
+  const [quizFeedback, setQuizFeedback] = useState(null);
+  const [quizStreak, setQuizStreak] = useState(0);
+
+  function nextQuiz() {
+    setQuizIdx((i) => (i + 1) % QUIZ_BANK.length);
+    setQuizPick(null);
+    setQuizFeedback(null);
+  }
+
+  function submitQuiz() {
+    if (quizPick == null) return;
+    const item = QUIZ_BANK[quizIdx];
+    const ok = quizPick === item.answer;
+    const delta = ok ? 18 + Math.min(quizStreak, 5) * 2 : 6;
+    setXp((x) => x + delta);
+    setQuizStreak((s) => (ok ? s + 1 : 0));
+    setQuizFeedback({ ok, why: item.why, delta });
+  }
+
+  // ---------- UI Helpers ----------
+  const LevelChip = () => (
+    <div className="flex items-center gap-2">
+      <Badge className="rounded-full">Level {level}</Badge>
+      <div className="w-44">
+        <Progress value={(xpInLevel / 120) * 100} />
+      </div>
+      <span className="text-xs text-white/70">{xpInLevel}/120 XP</span>
     </div>
+  );
 
-    <!-- Instructions -->
-    <div class="absolute top-10 left-10 border-l-2 border-gold/50 pl-4 py-2 bg-black/20 backdrop-blur-sm">
-        <div class="font-ancient text-[0.65rem] tracking-[0.3em] text-gold/60 mb-1">Navigation System</div>
-        <div class="text-xs text-white/80 font-medium uppercase">WASD &bull; Move</div>
-        <div class="text-xs text-gold font-bold uppercase">Click &bull; Target Orb</div>
-    </div>
-
-    <!-- Intro -->
-    <div id="screen-intro" class="absolute inset-0 flex items-center justify-center interactive bg-[#020617]">
-        <div class="ui-card max-w-2xl">
-            <div class="scanline"></div>
-            <div class="arabic-style text-4xl mb-4 text-gold opacity-60 tracking-widest">بيت الحكمة</div>
-            <h1 class="text-6xl mb-4 text-[#c5a059] tracking-tighter">THE HOUSE OF WISDOM</h1>
-            <p class="mb-10 text-slate-400 font-light tracking-wide text-lg">Journey through the celestial observatory. <br>Capture moving knowledge orbs to restore the library.</p>
-            <button id="start-btn" class="btn-gold">Begin Observation</button>
+  const Header = () => (
+    <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+      <div className="space-y-1">
+        <div className="inline-flex items-center gap-2">
+          <div className="h-10 w-10 rounded-2xl bg-white/10 flex items-center justify-center">
+            <MoonStar className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Falak Arcade</h1>
+            <p className="text-sm text-white/70">Learn Islamic astronomy concepts through mini-challenges.</p>
+          </div>
         </div>
+      </div>
+      <LevelChip />
     </div>
+  );
 
-    <!-- Compass -->
-    <div id="compass-container">
-        <div id="compass-strip">
-            N &bull;&bull;&bull; NE &bull;&bull;&bull; E &bull;&bull;&bull; SE &bull;&bull;&bull; S &bull;&bull;&bull; SW &bull;&bull;&bull; W &bull;&bull;&bull; NW &bull;&bull;&bull; N
+  // ---------- Render ----------
+  return (
+    <TooltipProvider>
+      <div className="min-h-[calc(100vh-2rem)] w-full p-4 md:p-8">
+        <div className="mx-auto max-w-6xl space-y-6">
+          <Header />
+
+          <Card className="rounded-2xl border-white/10 bg-white/5 shadow-xl">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Sparkles className="h-4 w-4" />
+                Choose a mode
+              </CardTitle>
+              <CardDescription>
+                These activities are educational simulations (not official criteria). Use your local authority for real decisions.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Tabs value={tab} onValueChange={setTab}>
+                <TabsList className="grid grid-cols-2 md:grid-cols-4 w-full">
+                  <TabsTrigger value="hilal" className="gap-2"><Telescope className="h-4 w-4" />Hilal Hunt</TabsTrigger>
+                  <TabsTrigger value="qibla" className="gap-2"><Compass className="h-4 w-4" />Qibla Quest</TabsTrigger>
+                  <TabsTrigger value="prayer" className="gap-2"><Sun className="h-4 w-4" />Prayer Planner</TabsTrigger>
+                  <TabsTrigger value="quiz" className="gap-2"><BookOpen className="h-4 w-4" />Quick Quiz</TabsTrigger>
+                </TabsList>
+
+                {/* HILAL */}
+                <TabsContent value="hilal" className="mt-5">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <Card className="rounded-2xl border-white/10 bg-white/5">
+                      <CardHeader>
+                        <CardTitle className="text-base flex items-center justify-between">
+                          <span className="inline-flex items-center gap-2"><Telescope className="h-4 w-4" />Setup</span>
+                          <Button variant="secondary" className="rounded-xl" onClick={randomHilal}>
+                            <Zap className="h-4 w-4 mr-2" />Random case
+                          </Button>
+                        </CardTitle>
+                        <CardDescription>Adjust parameters and decide: seen or not seen.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-5">
+                        <Control
+                          label="Moon altitude at sunset (°)"
+                          value={altDeg}
+                          min={-0.5}
+                          max={12}
+                          step={0.1}
+                          onChange={setAltDeg}
+                          hint="Higher altitude generally improves chances."
+                        />
+                        <Control
+                          label="Elongation (°)"
+                          value={elongDeg}
+                          min={0}
+                          max={18}
+                          step={0.1}
+                          onChange={setElongDeg}
+                          hint="Wider separation from Sun helps visibility."
+                        />
+                        <Control
+                          label="Moon age after conjunction (hours)"
+                          value={ageHours}
+                          min={0}
+                          max={30}
+                          step={1}
+                          onChange={setAgeHours}
+                          hint="Older crescents tend to be easier."
+                        />
+                        <Control
+                          label="Crescent width (arcmin)"
+                          value={widthArcMin}
+                          min={0}
+                          max={0.6}
+                          step={0.01}
+                          onChange={setWidthArcMin}
+                          hint="Thicker crescents are usually brighter."
+                        />
+                        <div className="flex items-center justify-between rounded-2xl bg-white/5 border border-white/10 p-3">
+                          <div className="space-y-0.5">
+                            <div className="text-sm font-medium">Haze</div>
+                            <div className="text-xs text-white/70">Light scattering reduces contrast.</div>
+                          </div>
+                          <Switch checked={haze} onCheckedChange={setHaze} />
+                        </div>
+                        <div className="flex items-center justify-between rounded-2xl bg-white/5 border border-white/10 p-3">
+                          <div className="space-y-0.5">
+                            <div className="text-sm font-medium">Clouds near horizon</div>
+                            <div className="text-xs text-white/70">Blocks the crescent even if geometry is good.</div>
+                          </div>
+                          <Switch checked={clouds} onCheckedChange={setClouds} />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <Button className="rounded-xl" onClick={() => submitHilalDecision("seen")}>
+                            <CheckCircle2 className="h-4 w-4 mr-2" />Seen
+                          </Button>
+                          <Button variant="secondary" className="rounded-xl" onClick={() => submitHilalDecision("not")}>
+                            <XCircle className="h-4 w-4 mr-2" />Not seen
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+
+                    <Card className="rounded-2xl border-white/10 bg-white/5 lg:col-span-2">
+                      <CardHeader>
+                        <CardTitle className="text-base flex items-center justify-between">
+                          <span className="inline-flex items-center gap-2"><Target className="h-4 w-4" />Analysis</span>
+                          <Badge className={`rounded-full border ${toneBadge(verdict.tone)}`}>{verdict.label}</Badge>
+                        </CardTitle>
+                        <CardDescription>
+                          Educational visibility score: {Math.round(hs.score * 100)} / 100
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                          <div className="flex items-start gap-3">
+                            <Info className="h-5 w-5 mt-0.5 text-white/70" />
+                            <div className="space-y-1">
+                              <div className="text-sm font-medium">How to think about it</div>
+                              <ul className="text-sm text-white/70 list-disc pl-5 space-y-1">
+                                <li>Altitude + elongation set the geometry of a thin crescent near sunset.</li>
+                                <li>Age and width relate to illumination/brightness (simplified).</li>
+                                <li>Haze/clouds can dominate real outcomes even with good geometry.</li>
+                              </ul>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <Card className="rounded-2xl border-white/10 bg-white/5">
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-sm">Your recent attempts</CardTitle>
+                              <CardDescription>Earn more XP by learning patterns.</CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-3">
+                              {hilalLog.length === 0 ? (
+                                <div className="text-sm text-white/60">No attempts yet. Try a case and decide.</div>
+                              ) : (
+                                <div className="space-y-2">
+                                  {hilalLog.map((r) => (
+                                    <div key={r.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                                      <div className="flex items-center justify-between">
+                                        <div className="text-sm font-medium">{r.verdict}</div>
+                                        <Badge className="rounded-full">+{r.delta} XP</Badge>
+                                      </div>
+                                      <div className="text-xs text-white/70 mt-1">
+                                        Alt {r.altDeg}°, El {r.elongDeg}°, Age {r.ageHours}h, Width {r.widthArcMin}′
+                                        {r.haze ? " • haze" : ""}{r.clouds ? " • clouds" : ""}
+                                      </div>
+                                      <div className="text-xs text-white/60 mt-1">You chose: {r.decision === "seen" ? "Seen" : "Not seen"}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </CardContent>
+                          </Card>
+
+                          <Card className="rounded-2xl border-white/10 bg-white/5">
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-sm">Mini goals</CardTitle>
+                              <CardDescription>Try these to master the concept.</CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-2 text-sm text-white/70">
+                              <Goal text="Create a ‘likely visible’ case without haze/clouds." />
+                              <Goal text="Turn on haze and observe how the verdict changes." />
+                              <Goal text="Keep geometry the same, increase width—what happens?" />
+                              <Goal text="Find a case where the verdict is ‘Uncertain’." />
+                            </CardContent>
+                          </Card>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                </TabsContent>
+
+                {/* QIBLA */}
+                <TabsContent value="qibla" className="mt-5">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <Card className="rounded-2xl border-white/10 bg-white/5">
+                      <CardHeader>
+                        <CardTitle className="text-base flex items-center justify-between">
+                          <span className="inline-flex items-center gap-2"><Compass className="h-4 w-4" />Target city</span>
+                          <Button variant="secondary" className="rounded-xl" onClick={nextQiblaLevel}>
+                            <RotateCcw className="h-4 w-4 mr-2" />Change
+                          </Button>
+                        </CardTitle>
+                        <CardDescription>Estimate the Qibla bearing (0–359°).</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                          <div className="text-lg font-semibold">{qLevel.city}</div>
+                          <div className="text-sm text-white/70 mt-1">Tip: {qLevel.tip}</div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className="text-sm font-medium">Your guess</div>
+                            <Badge className="rounded-full">{guessBearing}°</Badge>
+                          </div>
+                          <Slider
+                            value={[guessBearing]}
+                            min={0}
+                            max={359}
+                            step={1}
+                            onValueChange={(v) => setGuessBearing(v[0])}
+                          />
+                          <div className="text-xs text-white/60">0° = North, 90° = East, 180° = South, 270° = West</div>
+                        </div>
+
+                        <Button className="rounded-xl w-full" onClick={submitQibla}>
+                          <Compass className="h-4 w-4 mr-2" />Submit bearing
+                        </Button>
+                      </CardContent>
+                    </Card>
+
+                    <Card className="rounded-2xl border-white/10 bg-white/5 lg:col-span-2">
+                      <CardHeader>
+                        <CardTitle className="text-base">Results & learning</CardTitle>
+                        <CardDescription>Closer guesses earn more stars and XP.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                          <div className="flex items-start gap-3">
+                            <Info className="h-5 w-5 mt-0.5 text-white/70" />
+                            <div className="space-y-1">
+                              <div className="text-sm font-medium">Real-world note</div>
+                              <div className="text-sm text-white/70">
+                                Accurate Qibla uses great-circle direction on Earth (geodesy). This game uses simplified bearings to build intuition.
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <Card className="rounded-2xl border-white/10 bg-white/5">
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-sm">Recent attempts</CardTitle>
+                            </CardHeader>
+                            <CardContent className="space-y-2">
+                              {qiblaHistory.length === 0 ? (
+                                <div className="text-sm text-white/60">No attempts yet.</div>
+                              ) : (
+                                qiblaHistory.map((r) => (
+                                  <div key={r.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                                    <div className="flex items-center justify-between">
+                                      <div className="text-sm font-medium">{r.city}</div>
+                                      <Badge className="rounded-full">+{r.delta} XP</Badge>
+                                    </div>
+                                    <div className="text-xs text-white/70 mt-1">
+                                      Target {r.target}° • You {r.guess}° • Δ {Math.round(r.diff)}°
+                                    </div>
+                                    <div className="text-xs text-white/60 mt-1">
+                                      Stars: {"★".repeat(r.stars)}{"☆".repeat(3 - r.stars)}
+                                    </div>
+                                  </div>
+                                ))
+                              )}
+                            </CardContent>
+                          </Card>
+
+                          <Card className="rounded-2xl border-white/10 bg-white/5">
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-sm">Practice ideas</CardTitle>
+                            </CardHeader>
+                            <CardContent className="space-y-2 text-sm text-white/70">
+                              <Goal text="Try to get 3 stars (≤ 6° error)." />
+                              <Goal text="Notice how Qibla changes by region (UK vs Malaysia)." />
+                              <Goal text="Explain why great-circle matters on a sphere." />
+                              <Goal text="Relate compass bearings to map orientation." />
+                            </CardContent>
+                          </Card>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                </TabsContent>
+
+                {/* PRAYER */}
+                <TabsContent value="prayer" className="mt-5">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <Card className="rounded-2xl border-white/10 bg-white/5">
+                      <CardHeader>
+                        <CardTitle className="text-base flex items-center gap-2"><Sun className="h-4 w-4" />Scenario</CardTitle>
+                        <CardDescription>Select a location/season and choose a method.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div className="space-y-2">
+                          <div className="text-sm font-medium">Choose scenario</div>
+                          <div className="grid grid-cols-1 gap-2">
+                            {PRAYER_SCENARIOS.map((s) => (
+                              <button
+                                key={s.id}
+                                onClick={() => setPScenarioId(s.id)}
+                                className={`text-left rounded-2xl border p-3 transition ${
+                                  s.id === pScenarioId
+                                    ? "border-white/20 bg-white/10"
+                                    : "border-white/10 bg-white/5 hover:bg-white/10"
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="text-sm font-semibold">{s.title}</div>
+                                  <Badge className="rounded-full">~{s.lat}°</Badge>
+                                </div>
+                                <div className="text-xs text-white/70 mt-1">{s.desc}</div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <Separator className="bg-white/10" />
+
+                        <div className="space-y-2">
+                          <div className="text-sm font-medium">Choose method</div>
+                          <select
+                            value={methodPick}
+                            onChange={(e) => setMethodPick(e.target.value)}
+                            className="w-full rounded-xl bg-black/20 border border-white/10 p-2 text-sm"
+                          >
+                            {PRAYER_METHODS.map((m) => (
+                              <option key={m.name} value={m.name}>{m.name}</option>
+                            ))}
+                          </select>
+                          <div className="text-xs text-white/70">
+                            {PRAYER_METHODS.find((m) => m.name === methodPick)?.detail}
+                          </div>
+                        </div>
+
+                        <Button className="rounded-xl w-full" onClick={submitPlanner}>
+                          <TimerReset className="h-4 w-4 mr-2" />Submit method
+                        </Button>
+                      </CardContent>
+                    </Card>
+
+                    <Card className="rounded-2xl border-white/10 bg-white/5 lg:col-span-2">
+                      <CardHeader>
+                        <CardTitle className="text-base">Feedback</CardTitle>
+                        <CardDescription>Compare your pick with common high-latitude guidance options.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                          <div className="flex items-start gap-3">
+                            <Info className="h-5 w-5 mt-0.5 text-white/70" />
+                            <div className="space-y-1">
+                              <div className="text-sm font-medium">Hint</div>
+                              <div className="text-sm text-white/70">{scenario.hint}</div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <Card className="rounded-2xl border-white/10 bg-white/5">
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-sm">Commonly acceptable choices (in this game)</CardTitle>
+                              <CardDescription>Different councils use different rules.</CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-2">
+                              <div className="flex flex-wrap gap-2">
+                                {scenario.correct.map((c) => (
+                                  <Badge key={c} className="rounded-full" variant="secondary">{c}</Badge>
+                                ))}
+                              </div>
+                              <div className="text-xs text-white/60 mt-2">
+                                Real practice depends on fiqh positions and local authority decisions.
+                              </div>
+                            </CardContent>
+                          </Card>
+
+                          <Card className="rounded-2xl border-white/10 bg-white/5">
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-sm">Your recent picks</CardTitle>
+                            </CardHeader>
+                            <CardContent className="space-y-2">
+                              {plannerLog.length === 0 ? (
+                                <div className="text-sm text-white/60">No submissions yet.</div>
+                              ) : (
+                                plannerLog.map((r) => (
+                                  <div key={r.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                                    <div className="flex items-center justify-between">
+                                      <div className="text-sm font-medium">{r.scenario}</div>
+                                      <Badge className="rounded-full">+{r.delta} XP</Badge>
+                                    </div>
+                                    <div className="text-xs text-white/70 mt-1">Method: {r.method}</div>
+                                    <div className={`text-xs mt-1 ${r.ok ? "text-emerald-200" : "text-amber-200"}`}>
+                                      {r.ok ? "Reasonable for this scenario" : "Less suitable here (try another rule)"}
+                                    </div>
+                                  </div>
+                                ))
+                              )}
+                            </CardContent>
+                          </Card>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                </TabsContent>
+
+                {/* QUIZ */}
+                <TabsContent value="quiz" className="mt-5">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <Card className="rounded-2xl border-white/10 bg-white/5">
+                      <CardHeader>
+                        <CardTitle className="text-base flex items-center justify-between">
+                          <span className="inline-flex items-center gap-2"><BookOpen className="h-4 w-4" />Question</span>
+                          <Badge className="rounded-full" variant="secondary">{QUIZ_BANK[quizIdx].tag}</Badge>
+                        </CardTitle>
+                        <CardDescription>Streak: {quizStreak}</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                          <div className="text-sm font-medium">{QUIZ_BANK[quizIdx].q}</div>
+                        </div>
+
+                        <div className="space-y-2">
+                          {QUIZ_BANK[quizIdx].options.map((opt, idx) => (
+                            <button
+                              key={opt}
+                              onClick={() => setQuizPick(idx)}
+                              className={`w-full text-left rounded-2xl border p-3 transition ${
+                                quizPick === idx
+                                  ? "border-white/20 bg-white/10"
+                                  : "border-white/10 bg-white/5 hover:bg-white/10"
+                              }`}
+                            >
+                              <div className="text-sm">{opt}</div>
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <Button className="rounded-xl" onClick={submitQuiz}>Submit</Button>
+                          <Button variant="secondary" className="rounded-xl" onClick={nextQuiz}>Next</Button>
+                        </div>
+
+                        <AnimatePresence>
+                          {quizFeedback && (
+                            <motion.div
+                              initial={{ opacity: 0, y: 8 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0, y: 8 }}
+                              className={`rounded-2xl border p-3 ${
+                                quizFeedback.ok
+                                  ? "border-emerald-500/30 bg-emerald-500/10"
+                                  : "border-rose-500/30 bg-rose-500/10"
+                              }`}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="text-sm font-medium">
+                                  {quizFeedback.ok ? "Correct" : "Not quite"}
+                                </div>
+                                <Badge className="rounded-full">+{quizFeedback.delta} XP</Badge>
+                              </div>
+                              <div className="text-xs text-white/70 mt-1">{quizFeedback.why}</div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </CardContent>
+                    </Card>
+
+                    <Card className="rounded-2xl border-white/10 bg-white/5 lg:col-span-2">
+                      <CardHeader>
+                        <CardTitle className="text-base">Build your own set</CardTitle>
+                        <CardDescription>Add questions for your class or journal club.</CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <QuizBuilder
+                          onAdd={(item) => {
+                            QUIZ_BANK.push(item);
+                            setXp((x) => x + 10);
+                          }}
+                        />
+                      </CardContent>
+                    </Card>
+                  </div>
+                </TabsContent>
+              </Tabs>
+            </CardContent>
+          </Card>
+
+          <Footer xp={xp} level={level} />
         </div>
-        <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[1px] h-full bg-white/40"></div>
-    </div>
+      </div>
+    </TooltipProvider>
+  );
+}
 
-    <!-- Question Modal -->
-    <div id="modal-question" class="hidden absolute inset-0 flex items-center justify-center interactive bg-black/80 backdrop-blur-md">
-        <div class="ui-card max-w-xl w-full">
-            <div class="font-ancient text-xs tracking-[0.5em] text-gold/60 mb-6 uppercase">Orb Data Decryption</div>
-            <p id="q-text" class="text-2xl text-white mb-8 leading-snug"></p>
-            <div id="q-options" class="grid grid-cols-1 gap-3"></div>
-            <div id="q-feedback" class="hidden"></div>
-            <div id="tts-indicator" class="mt-6 flex items-center justify-center gap-3 text-xs text-gold/80 hidden">
-                <div class="loader"></div>
-                <span class="font-ancient tracking-widest">TRANSCRIBING ORAL TRADITION...</span>
-            </div>
+function Goal({ text }) {
+  return (
+    <div className="flex items-start gap-2">
+      <div className="mt-1 h-2 w-2 rounded-full bg-white/40" />
+      <div>{text}</div>
+    </div>
+  );
+}
+
+function Control({ label, value, min, max, step, onChange, hint }) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium flex items-center gap-2">
+          {label}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button className="inline-flex items-center justify-center h-6 w-6 rounded-xl bg-white/5 border border-white/10">
+                <Info className="h-3.5 w-3.5 text-white/70" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+              <p className="text-xs">{hint}</p>
+            </TooltipContent>
+          </Tooltip>
         </div>
+        <Badge className="rounded-full" variant="secondary">{value}</Badge>
+      </div>
+      <Slider
+        value={[value]}
+        min={min}
+        max={max}
+        step={step}
+        onValueChange={(v) => onChange(v[0])}
+      />
+      <div className="flex items-center justify-between text-xs text-white/60">
+        <span>{min}</span>
+        <span>{max}</span>
+      </div>
     </div>
+  );
+}
 
-    <!-- HUD Stats -->
-    <div class="absolute top-10 right-10 text-right">
-        <div class="font-ancient text-[0.65rem] tracking-[0.4em] text-gold/60 mb-2">Knowledge Restored</div>
-        <div class="flex items-center gap-4 justify-end">
-            <div id="score-dots" class="flex gap-1.5"></div>
-            <div class="text-4xl font-ancient text-gold" id="score-display">0<span class="text-lg opacity-40">/8</span></div>
+function QuizBuilder({ onAdd }) {
+  const [q, setQ] = useState("");
+  const [a, setA] = useState("");
+  const [b, setB] = useState("");
+  const [c, setC] = useState("");
+  const [d, setD] = useState("");
+  const [ans, setAns] = useState("B");
+  const [tag, setTag] = useState("Custom");
+  const [why, setWhy] = useState("");
+
+  function add() {
+    const opts = [a, b, c, d].map((s) => s.trim()).filter(Boolean);
+    if (!q.trim() || opts.length < 2) return;
+    const idx = ans === "A" ? 0 : ans === "B" ? 1 : ans === "C" ? 2 : 3;
+    const item = {
+      q: q.trim(),
+      options: [a || "Option A", b || "Option B", c || "Option C", d || "Option D"],
+      answer: idx,
+      why: why.trim() || "", 
+      tag: tag.trim() || "Custom",
+    };
+    onAdd(item);
+    setQ(""); setA(""); setB(""); setC(""); setD(""); setWhy("");
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="space-y-2">
+          <div className="text-sm font-medium">Question</div>
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Write a question about falak..." className="rounded-xl" />
         </div>
-    </div>
-
-    <!-- Win Screen -->
-    <div id="win-screen" class="interactive">
-        <div class="ui-card max-w-2xl">
-            <h1 class="text-6xl mb-4 text-gold font-ancient">WISDOM RESTORED</h1>
-            <p class="mb-10 text-slate-400">The library of the House of Wisdom is complete once more.</p>
-            <button onclick="location.reload()" class="btn-gold">Observe Again</button>
+        <div className="space-y-2">
+          <div className="text-sm font-medium">Tag</div>
+          <Input value={tag} onChange={(e) => setTag(e.target.value)} placeholder="Hilal / Qibla / Prayer Times" className="rounded-xl" />
         </div>
-    </div>
+      </div>
 
-    <!-- AI Consult -->
-    <div class="absolute bottom-10 right-10 interactive">
-        <button onclick="askGemini()" class="group flex items-center gap-4 bg-black/40 hover:bg-gold/10 p-2 pr-8 rounded-full border border-gold/30 transition-all duration-500">
-            <div class="w-14 h-14 rounded-full bg-gold flex items-center justify-center text-slate-900 shadow-[0_0_20px_rgba(197,160,89,0.4)] group-hover:rotate-45 transition-transform">
-                <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18M5.45 5.45l13.1 13.1M18.55 5.45L5.45 18.55"/></svg>
-            </div>
-            <span class="font-ancient text-xs uppercase tracking-[0.2em] text-gold font-bold">Consult Archives</span>
-        </button>
-    </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <Input value={a} onChange={(e) => setA(e.target.value)} placeholder="Option A" className="rounded-xl" />
+        <Input value={b} onChange={(e) => setB(e.target.value)} placeholder="Option B" className="rounded-xl" />
+        <Input value={c} onChange={(e) => setC(e.target.value)} placeholder="Option C" className="rounded-xl" />
+        <Input value={d} onChange={(e) => setD(e.target.value)} placeholder="Option D" className="rounded-xl" />
+      </div>
 
-    <div id="modal-ai" class="hidden absolute inset-0 flex items-center justify-center interactive bg-[#020617]/95">
-        <div class="ui-card max-w-3xl w-full text-left">
-            <h2 class="text-4xl mb-6 text-gold font-ancient border-b border-gold/20 pb-4">Scholarly Archives</h2>
-            <div id="ai-response-content" class="text-lg leading-relaxed text-slate-300 font-serif italic h-64 overflow-y-auto pr-4">
-                <div class="flex justify-center items-center h-full"><div class="loader"></div></div>
-            </div>
-            <button onclick="closeAI()" class="btn-gold mt-10 w-full">Return to Observatory</button>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+        <div className="space-y-2">
+          <div className="text-sm font-medium">Correct answer</div>
+          <select value={ans} onChange={(e) => setAns(e.target.value)} className="w-full rounded-xl bg-black/20 border border-white/10 p-2 text-sm">
+            <option value="A">A</option>
+            <option value="B">B</option>
+            <option value="C">C</option>
+            <option value="D">D</option>
+          </select>
         </div>
+        <div className="space-y-2 md:col-span-2">
+          <div className="text-sm font-medium">Explanation (optional)</div>
+          <Input value={why} onChange={(e) => setWhy(e.target.value)} placeholder="Why is that the correct answer?" className="rounded-xl" />
+        </div>
+      </div>
+
+      <Button className="rounded-xl" onClick={add}>Add question (+10 XP)</Button>
+
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+        <div className="flex items-start gap-2">
+          <Info className="h-4 w-4 mt-0.5 text-white/70" />
+          <div className="text-sm text-white/70">
+            Tip: you can tailor questions to your course (rukyah criteria, fiqh, image processing, light pollution, etc.).
+          </div>
+        </div>
+      </div>
     </div>
-</div>
+  );
+}
 
-<script>
-    const apiKey = "";
-    let scene, camera, renderer, clock;
-    let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
-    let velocity = new THREE.Vector3(), direction = new THREE.Vector3();
-    let yaw = 0, pitch = 0, orbs = [], score = 0, activeQuestion = null;
-    let raycaster = new THREE.Raycaster(), laserLine = null;
-
-    const questions = [
-        { text: "Who is known as the 'Father of Algebra' and worked at the House of Wisdom?", options: ["Al-Battani", "Al-Khwarizmi", "Ibn Sina", "Al-Razi"], correct: 1, fact: "Al-Khwarizmi's book 'Al-Jabr' gave algebra its name." },
-        { text: "Which instrument was used to calculate the height of stars above the horizon?", options: ["Astrolabe", "Sundial", "Hourglass", "Compass"], correct: 0, fact: "The astrolabe was a 'mathematical jewel' used for navigation and prayer times." },
-        { text: "The 'Zij' tables were essential for what scientific purpose?", options: ["Medicine", "Astronomical calculations", "Alchemy", "Poetry"], correct: 1, fact: "Zij tables recorded planetary positions, eclipses, and calendar data." },
-        { text: "Which 13th-century observatory was once the most advanced in the world?", options: ["Baghdad", "Cairo", "Maragha", "Cordoba"], correct: 2, fact: "Maragha observatory housed over 400,000 manuscripts and advanced tools." },
-        { text: "The 'Tusi Couple' provided a geometric solution for what?", options: ["Measuring Wind", "Planetary Motion", "Refining Salt", "Ocean Tides"], correct: 1, fact: "It allowed for linear motion to be produced from two circular motions." },
-        { text: "Who correctly explained that we see objects because light reflects off them into our eyes?", options: ["Aristotle", "Ibn al-Haytham", "Ptolemy", "Galileo"], correct: 1, fact: "His 'Book of Optics' laid the foundations for the modern scientific method." },
-        { text: "What did Al-Farghani calculate with incredible precision in the 9th century?", options: ["Earth's Diameter", "Speed of Sound", "Weight of Air", "Size of the Moon"], correct: 0, fact: "His measurements of Earth's size were later used by Columbus." },
-        { text: "The lunar calendar used in the Islamic world is based on which cycle?", options: ["Solar Year", "Phases of the Moon", "Venus Transit", "Seasonal Winds"], correct: 1, fact: "It is approximately 11 days shorter than the solar year." }
-    ];
-
-    function init() {
-        scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x020617);
-        scene.fog = new THREE.FogExp2(0x020617, 0.02);
-
-        camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 2000);
-        camera.position.y = 1.8;
-
-        renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(window.devicePixelRatio);
-        document.body.appendChild(renderer.domElement);
-
-        clock = new THREE.Clock();
-        
-        // World setup
-        const worldSize = 300;
-        
-        // Lighting
-        scene.add(new THREE.AmbientLight(0x4040ff, 0.4));
-        const sun = new THREE.DirectionalLight(0xffe0b0, 0.8);
-        sun.position.set(50, 100, 50);
-        scene.add(sun);
-
-        // Floor with reflective-like pattern
-        const floorGeo = new THREE.PlaneGeometry(worldSize, worldSize);
-        const floorMat = new THREE.MeshStandardMaterial({ 
-            color: 0x05080f, 
-            roughness: 0.8, 
-            metalness: 0.1 
-        });
-        const floor = new THREE.Mesh(floorGeo, floorMat);
-        floor.rotation.x = -Math.PI / 2;
-        scene.add(floor);
-
-        // Decorative Grid
-        const grid = new THREE.GridHelper(worldSize, 120, 0xc5a059, 0x111827);
-        grid.position.y = 0.05;
-        scene.add(grid);
-
-        // Boundary Ring
-        const ringGeo = new THREE.TorusGeometry(worldSize/2, 1, 16, 100);
-        const ringMat = new THREE.MeshBasicMaterial({ color: 0xc5a059, transparent: true, opacity: 0.2 });
-        const ring = new THREE.Mesh(ringGeo, ringMat);
-        ring.rotation.x = Math.PI / 2;
-        scene.add(ring);
-
-        // Stars
-        const starGeo = new THREE.BufferGeometry();
-        const starPos = [];
-        for(let i=0; i<5000; i++) {
-            starPos.push((Math.random()-0.5)*1000, Math.random()*500, (Math.random()-0.5)*1000);
-        }
-        starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
-        scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.8 })));
-
-        // Create Orbs
-        questions.forEach((q, i) => {
-            const group = new THREE.Group();
-            
-            const outer = new THREE.Mesh(
-                new THREE.IcosahedronGeometry(1.2, 1),
-                new THREE.MeshStandardMaterial({ color: 0xc5a059, wireframe: true, emissive: 0xc5a059, emissiveIntensity: 0.5 })
-            );
-            
-            const inner = new THREE.Mesh(
-                new THREE.SphereGeometry(0.5, 16, 16),
-                new THREE.MeshBasicMaterial({ color: 0xffffff })
-            );
-
-            group.add(outer);
-            group.add(inner);
-
-            const angle = (i / questions.length) * Math.PI * 2;
-            const radius = 50 + Math.random() * 30;
-            const x = Math.cos(angle) * radius;
-            const z = Math.sin(angle) * radius;
-            
-            group.position.set(x, 4 + Math.random() * 3, z);
-            group.userData = {
-                id: i,
-                active: true,
-                baseY: group.position.y,
-                baseX: x,
-                baseZ: z,
-                phase: Math.random() * Math.PI * 2,
-                speed: 0.8 + Math.random() * 1.2,
-                pattern: i % 3
-            };
-            
-            scene.add(group);
-            orbs.push(group);
-        });
-
-        // Score display init
-        const dots = document.getElementById('score-dots');
-        for(let i=0; i<8; i++) {
-            const d = document.createElement('div');
-            d.id = `dot-${i}`;
-            d.className = 'w-1.5 h-1.5 rounded-full border border-gold/40 transition-all duration-500';
-            dots.appendChild(d);
-        }
-
-        // Input listeners
-        window.addEventListener('keydown', e => { if(!activeQuestion) handleKey(e.code, true); });
-        window.addEventListener('keyup', e => handleKey(e.code, false));
-        window.addEventListener('mousemove', onMouseMove);
-        window.addEventListener('mousedown', onMouseDown);
-        window.addEventListener('resize', onResize);
-        
-        document.getElementById('start-btn').onclick = () => {
-            document.getElementById('screen-intro').classList.add('hidden');
-            document.body.requestPointerLock();
-            animate();
-        };
-    }
-
-    function handleKey(code, val) {
-        switch(code) {
-            case 'KeyW': moveForward = val; break;
-            case 'KeyS': moveBackward = val; break;
-            case 'KeyA': moveLeft = val; break;
-            case 'KeyD': moveRight = val; break;
-        }
-    }
-
-    function onMouseMove(e) {
-        if(document.pointerLockElement !== document.body || activeQuestion) return;
-        yaw -= e.movementX * 0.002;
-        pitch -= e.movementY * 0.002;
-        pitch = Math.max(-1.4, Math.min(1.4, pitch));
-        
-        camera.rotation.order = "YXZ";
-        camera.rotation.y = yaw;
-        camera.rotation.x = pitch;
-
-        const deg = (yaw * (180/Math.PI)) % 360;
-        document.getElementById('compass-strip').style.transform = `translateX(${-deg * 2.22}px)`;
-    }
-
-    function onMouseDown(e) {
-        if(e.button === 0 && document.pointerLockElement && !activeQuestion) fireRay();
-    }
-
-    function fireRay() {
-        raycaster.setFromCamera({x:0, y:0}, camera);
-        const hitGroup = raycaster.intersectObjects(orbs, true);
-        
-        // Beam Effect
-        const start = new THREE.Vector3(0.2, -0.4, -0.5).applyMatrix4(camera.matrixWorld);
-        const end = hitGroup.length > 0 ? hitGroup[0].point : raycaster.ray.at(100, new THREE.Vector3());
-        
-        const beamGeo = new THREE.BufferGeometry().setFromPoints([start, end]);
-        const beam = new THREE.Line(beamGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }));
-        scene.add(beam);
-        setTimeout(() => scene.remove(beam), 100);
-
-        if(hitGroup.length > 0) {
-            let target = hitGroup[0].object;
-            while(target.parent && !target.userData.id && target.parent !== scene) target = target.parent;
-            if(target.userData.active) openQuestion(target.userData.id);
-        }
-    }
-
-    function openQuestion(id) {
-        activeQuestion = questions[id];
-        const modal = document.getElementById('modal-question');
-        modal.classList.remove('hidden');
-        document.getElementById('q-text').innerText = activeQuestion.text;
-        
-        const opts = document.getElementById('q-options');
-        opts.innerHTML = '';
-        activeQuestion.options.forEach((o, i) => {
-            const b = document.createElement('button');
-            b.className = 'btn-gold !bg-white/5 border-gold/20 text-white hover:!bg-gold hover:!text-slate-900 lowercase font-light text-left px-6 py-4 transition-all';
-            b.innerText = o;
-            b.onclick = () => checkAnswer(i, id);
-            opts.appendChild(b);
-        });
-        document.exitPointerLock();
-    }
-
-    function checkAnswer(idx, orbId) {
-        const feed = document.getElementById('q-feedback');
-        feed.classList.remove('hidden');
-        if(idx === activeQuestion.correct) {
-            feed.innerHTML = `<div class="fact-card"><div class="text-gold font-bold mb-1">ALIGNMENT SUCCESSFUL</div><div class="text-white text-sm">${activeQuestion.fact}</div></div>`;
-            speak(activeQuestion.fact);
-            orbs[orbId].userData.active = false;
-            orbs[orbId].visible = false;
-            
-            document.getElementById(`dot-${score}`).classList.add('!bg-gold', 'shadow-[0_0_8px_#c5a059]');
-            score++;
-            document.getElementById('score-display').innerHTML = `${score}<span class="text-lg opacity-40">/8</span>`;
-            
-            if(score === 8) {
-                setTimeout(() => {
-                    document.getElementById('win-screen').style.display = 'flex';
-                    document.exitPointerLock();
-                }, 3000);
-            }
-
-            setTimeout(() => {
-                activeQuestion = null;
-                document.getElementById('modal-question').classList.add('hidden');
-                feed.classList.add('hidden');
-                document.body.requestPointerLock();
-            }, 5000);
-        } else {
-            feed.innerHTML = `<div class="mt-4 text-red-400 font-ancient tracking-widest text-xs uppercase">Decryption Error - Focus Divergent</div>`;
-        }
-    }
-
-    async function speak(text) {
-        const ind = document.getElementById('tts-indicator');
-        ind.classList.remove('hidden');
-        try {
-            const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    contents: [{ parts: [{ text: `Scholar: ${text}` }] }],
-                    generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } } } },
-                    model: "gemini-2.5-flash-preview-tts"
-                })
-            });
-            const res = await resp.json();
-            const wav = pcmToWav(res.candidates[0].content.parts[0].inlineData.data, 24000);
-            new Audio(URL.createObjectURL(wav)).play();
-        } catch(e) {} finally { ind.classList.add('hidden'); }
-    }
-
-    function pcmToWav(b64, rate) {
-        const buf = Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
-        const head = new ArrayBuffer(44);
-        const v = new DataView(head);
-        v.setUint32(0, 0x46464952, true); v.setUint32(4, 36 + buf.byteLength, true); v.setUint32(8, 0x45564157, true); v.setUint32(12, 0x20746d66, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); v.setUint32(36, 0x61746164, true); v.setUint32(40, buf.byteLength, true);
-        return new Blob([head, buf], { type: 'audio/wav' });
-    }
-
-    async function askGemini() {
-        const mod = document.getElementById('modal-ai');
-        const cont = document.getElementById('ai-response-content');
-        mod.classList.remove('hidden');
-        cont.innerHTML = '<div class="flex justify-center items-center h-full"><div class="loader"></div></div>';
-        document.exitPointerLock();
-        try {
-            const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts: [{ text: "Explain the legacy of the House of Wisdom and how it preserved Greek and Indian scientific knowledge while adding original Islamic discoveries." }] }] })
-            });
-            const d = await r.json();
-            cont.innerText = d.candidates?.[0]?.content?.parts?.[0]?.text;
-        } catch(e) { cont.innerText = "The archives are temporarily inaccessible. Reconnect to the House of Wisdom."; }
-    }
-
-    function closeAI() { document.getElementById('modal-ai').classList.add('hidden'); document.body.requestPointerLock(); }
-    function onResize() { camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); }
-
-    function animate() {
-        requestAnimationFrame(animate);
-        const dt = clock.getDelta();
-        const time = Date.now() * 0.001;
-
-        if(!activeQuestion) {
-            velocity.x -= velocity.x * 10 * dt;
-            velocity.z -= velocity.z * 10 * dt;
-            
-            direction.z = Number(moveForward) - Number(moveBackward);
-            direction.x = Number(moveRight) - Number(moveLeft);
-            direction.normalize();
-
-            if(moveForward || moveBackward) velocity.z -= direction.z * 60 * dt;
-            if(moveLeft || moveRight) velocity.x -= direction.x * 60 * dt;
-
-            camera.translateX(-velocity.x * dt);
-            camera.translateZ(velocity.z * dt);
-            
-            // Boundary Clamping
-            const dist = Math.sqrt(camera.position.x**2 + camera.position.z**2);
-            if(dist > 145) {
-                const angle = Math.atan2(camera.position.z, camera.position.x);
-                camera.position.x = Math.cos(angle) * 145;
-                camera.position.z = Math.sin(angle) * 145;
-            }
-
-            // Head Bob
-            const bob = (moveForward || moveBackward || moveLeft || moveRight) ? Math.sin(time * 10) * 0.05 : 0;
-            camera.position.y = 1.8 + bob;
-
-            // Orb Logic
-            raycaster.setFromCamera({x:0, y:0}, camera);
-            const hits = raycaster.intersectObjects(orbs, true);
-            document.getElementById('crosshair').className = hits.length > 0 ? 'target-locked' : '';
-
-            orbs.forEach(o => {
-                if(o.userData.active) {
-                    const ud = o.userData;
-                    o.rotation.y += dt;
-                    o.rotation.x += dt * 0.5;
-
-                    // Orb Pulse
-                    const scale = 1 + Math.sin(time * 3 + ud.phase) * 0.1;
-                    o.scale.set(scale, scale, scale);
-
-                    // Movement Patterns
-                    switch(ud.pattern) {
-                        case 0: // Circle
-                            o.position.x = ud.baseX + Math.cos(time * ud.speed + ud.phase) * 10;
-                            o.position.z = ud.baseZ + Math.sin(time * ud.speed + ud.phase) * 10;
-                            break;
-                        case 1: // Vertical
-                            o.position.y = ud.baseY + Math.sin(time * ud.speed * 2) * 5;
-                            break;
-                        case 2: // ZigZag
-                            o.position.x = ud.baseX + Math.sin(time * ud.speed) * 15;
-                            o.position.y = ud.baseY + Math.cos(time * ud.speed * 1.5) * 4;
-                            break;
-                    }
-                }
-            });
-        }
-        renderer.render(scene, camera);
-    }
-
-    window.onload = init;
-</script>
-</body>
-</html>
+function Footer({ xp, level }) {
+  return (
+    <Card className="rounded-2xl border-white/10 bg-white/5">
+      <CardContent className="p-5">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div className="space-y-1">
+            <div className="text-sm font-medium">Your progress</div>
+            <div className="text-xs text-white/70">Total XP: {xp} • Level {level}</div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge className="rounded-full" variant="secondary">Hilal</Badge>
+            <Badge className="rounded-full" variant="secondary">Qibla</Badge>
+            <Badge className="rounded-full" variant="secondary">Prayer Times</Badge>
+            <Badge className="rounded-full" variant="secondary">Quiz</Badge>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
